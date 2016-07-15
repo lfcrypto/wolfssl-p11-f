@@ -1927,6 +1927,9 @@ struct WOLFSSL_CTX {
     buffer      serverDH_P;
     buffer      serverDH_G;
 #endif
+#ifdef HAVE_PKCS11
+    word32 p11SessionId; /* use to be able to communicate with HSM */
+#endif /* HAVE_PKCS11 */
 #ifndef NO_CERTS
     DerBuffer*  certificate;
     DerBuffer*  certChain;
@@ -2684,6 +2687,9 @@ struct WOLFSSL {
 #ifdef WOLFSSL_ASYNC_CRYPT
     AsyncCrypt      async;
 #endif
+#ifdef HAVE_PKCS11
+    word32 p11SessionId;            /* use to be able to communicate with HSM */
+#endif
     void*           sigKey;             /* RsaKey or ecc_key allocated from heap */
     word32          sigType;            /* Type of sigKey */
     word32          sigLen;             /* Actual signature length */
@@ -3136,7 +3142,6 @@ WOLFSSL_LOCAL int SetKeysSide(WOLFSSL*, enum encrypt_side);
 WOLFSSL_LOCAL int BuildMessage(WOLFSSL* ssl, byte* output, int outSz,
                         const byte* input, int inSz, int type, int hashOutput,
                         int sizeOnly);
-
 #ifdef __cplusplus
     }  /* extern "C" */
 #endif

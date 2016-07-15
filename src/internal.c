@@ -1491,6 +1491,11 @@ void SSL_CtxResourceFree(WOLFSSL_CTX* ctx)
     wolfSSL_CertManagerFree(ctx->cm);
 #endif
 
+#ifdef HAVE_PKCS11
+    if (ctx->p11SessionId)
+        wc_PKCS11_CloseSession(ctx->p11SessionId);
+#endif
+
 #ifdef HAVE_TLS_EXTENSIONS
     TLSX_FreeAll(ctx->extensions, ctx->heap);
 
@@ -2700,10 +2705,9 @@ int RsaSign(WOLFSSL* ssl, const byte* in, word32 inSz, byte* out,
     }
 #endif /* WOLFSSL_ASYNC_CRYPT_TEST */
 
-#if defined(HAVE_PK_CALLBACKS)
+#ifdef HAVE_PK_CALLBACKS
     if (ssl->ctx->RsaSignCb) {
-        ret = ssl->ctx->RsaSignCb(ssl, in, inSz, out, outSz, keyBuf, keySz,
-                                                                          ctx);
+        ret = ssl->ctx->RsaSignCb(ssl, in, inSz, out, outSz, keyBuf, keySz,ctx);
     }
     else
 #endif /*HAVE_PK_CALLBACKS */
@@ -2821,8 +2825,7 @@ int RsaDec(WOLFSSL* ssl, byte* in, word32 inSz, byte** out, word32* outSz,
 
 #ifdef HAVE_PK_CALLBACKS
     if (ssl->ctx->RsaDecCb) {
-            ret = ssl->ctx->RsaDecCb(ssl, in, inSz, out, keyBuf, keySz,
-                                                                    ctx);
+        ret = ssl->ctx->RsaDecCb(ssl, in, inSz, out, keyBuf, keySz, ctx);
     }
     else
 #endif /* HAVE_PK_CALLBACKS */
@@ -3171,6 +3174,10 @@ int SetSSL_CTX(WOLFSSL* ssl, WOLFSSL_CTX* ctx)
     ssl->devId = ctx->devId;
 #endif
 
+#ifdef HAVE_PKCS11
+    ssl->p11SessionId = ctx->p11SessionId;
+#endif
+    
 #ifndef NO_PSK
     if (ctx->server_hint[0]) {   /* set in CTX */
         XSTRNCPY(ssl->arrays->server_hint, ctx->server_hint, MAX_PSK_ID_LEN);
@@ -3525,7 +3532,12 @@ static void FreeKeyExchange(WOLFSSL* ssl)
         #ifndef NO_RSA
             case DYNAMIC_TYPE_RSA:
             {
-                wc_FreeRsaKey((RsaKey*)ssl->sigKey);
+#ifdef HAVE_PKCS11
+                if (((RsaKey*)ssl->sigKey)->hsm)
+                    wc_FreeRsaKeyPKCS11((RsaKey*)ssl->sigKey);
+                else
+#endif
+                    wc_FreeRsaKey((RsaKey*)ssl->sigKey);
                 XFREE(ssl->sigKey, ssl->heap, DYNAMIC_TYPE_RSA);
                 break;
             }
@@ -3584,6 +3596,10 @@ void SSL_ResourceFree(WOLFSSL* ssl)
 #ifndef NO_CERTS
     ssl->keepCert = 0; /* make sure certificate is free'd */
     wolfSSL_UnloadCertsKeys(ssl);
+#endif
+#ifdef HAVE_PKCS11
+    if (ssl->p11SessionId)
+        wc_PKCS11_CloseSession(ssl->p11SessionId);
 #endif
 #ifndef NO_RSA
     if (ssl->peerRsaKey) {
@@ -15228,11 +15244,24 @@ static word32 QSH_KeyExchangeWrite(WOLFSSL* ssl, byte isServer)
         wc_ecc_init_h(&eccKey, ssl->heap);
 #endif
 #ifndef NO_RSA
-        ret = wc_InitRsaKey(&key, ssl->heap);
+#ifdef HAVE_PKCS11
+        if (ssl->buffers.key->type == RSA_HSM_TYPE)
+            ret = wc_InitRsaKeyPKCS11(&key, ssl->heap, ssl->p11SessionId);
+        else
+#endif
+            ret = wc_InitRsaKey(&key, ssl->heap);
         if (ret == 0) initRsaKey = 1;
-        if (ret == 0)
-            ret = wc_RsaPrivateKeyDecode(ssl->buffers.key->buffer, &idx, &key,
-                                      ssl->buffers.key->length);
+        if (ret == 0) {
+#ifdef HAVE_PKCS11
+            if (key.hsm)
+                ret = wc_RsaPrivateKeyDecodePKCS11(ssl->buffers.key->buffer,
+                                                   ssl->buffers.key->length,
+                                                   &key);
+            else
+#endif
+                ret = wc_RsaPrivateKeyDecode(ssl->buffers.key->buffer, &idx,
+                                             &key, ssl->buffers.key->length);
+        }
         if (ret == 0) {
             int keySz = wc_RsaEncryptSize(&key);
             if (keySz < 0) { /* check if keySz has error case */
@@ -15296,8 +15325,14 @@ static word32 QSH_KeyExchangeWrite(WOLFSSL* ssl, byte isServer)
                                                        DYNAMIC_TYPE_TMP_BUFFER);
             if (encodedSig == NULL) {
             #ifndef NO_RSA
-                if (initRsaKey)
-                    wc_FreeRsaKey(&key);
+                if (initRsaKey) {
+#ifdef HAVE_PKCS11
+                    if (key.hsm)
+                        wc_FreeRsaKeyPKCS11(&key);
+                    else
+#endif
+                        wc_FreeRsaKey(&key);
+                }
             #endif
             #ifdef HAVE_ECC
                 wc_ecc_free(&eccKey);
@@ -15521,8 +15556,14 @@ static word32 QSH_KeyExchangeWrite(WOLFSSL* ssl, byte isServer)
             }
         }
 #ifndef NO_RSA
-        if (initRsaKey)
-            wc_FreeRsaKey(&key);
+        if (initRsaKey) {
+#ifdef HAVE_PKCS11
+            if (key.hsm)
+                wc_FreeRsaKeyPKCS11(&key);
+            else
+#endif
+                wc_FreeRsaKey(&key);
+        }
 #endif
 #ifdef HAVE_ECC
         wc_ecc_free(&eccKey);
@@ -16208,16 +16249,30 @@ int DoSessionTicket(WOLFSSL* ssl,
                                     ERROR_OUT(MEMORY_E, exit_sske);
                                 }
                                 ssl->sigType = DYNAMIC_TYPE_RSA;
-
-                                ret = wc_InitRsaKey((RsaKey*)ssl->sigKey,
+#ifdef HAVE_PKCS11
+                                if (ssl->buffers.key->type == RSA_HSM_TYPE)
+                                    ret = wc_InitRsaKeyPKCS11(
+                                                (RsaKey*)ssl->sigKey,
+                                                ssl->heap, ssl->p11SessionId);
+                                else
+#endif
+                                    ret = wc_InitRsaKey((RsaKey*)ssl->sigKey,
                                                                      ssl->heap);
                                 if (ret != 0) {
                                     goto exit_sske;
                                 }
-
-                                ret = wc_RsaPrivateKeyDecode(ssl->buffers.key->buffer,
-                                                      &i, (RsaKey*)ssl->sigKey,
-                                                      ssl->buffers.key->length);
+#ifdef HAVE_PKCS11
+                                if (((RsaKey*)ssl->sigKey)->hsm)
+                                    ret = wc_RsaPrivateKeyDecodePKCS11(
+                                                    ssl->buffers.key->buffer,
+                                                    ssl->buffers.key->length,
+                                                    (RsaKey*)ssl->sigKey);
+                                else
+#endif
+                                    ret = wc_RsaPrivateKeyDecode(
+                                                    ssl->buffers.key->buffer,
+                                                    &i, (RsaKey*)ssl->sigKey,
+                                                    ssl->buffers.key->length);
                                 if (ret != 0) {
                                     goto exit_sske;
                                 }
@@ -16508,8 +16563,15 @@ int DoSessionTicket(WOLFSSL* ssl,
                                 ERROR_OUT(MEMORY_E, exit_sske);
                             }
                             ssl->sigType = DYNAMIC_TYPE_RSA;
-
-                            ret = wc_InitRsaKey((RsaKey*)ssl->sigKey,ssl->heap);
+#ifdef HAVE_PKCS11
+                            if (ssl->buffers.key->type == RSA_HSM_TYPE)
+                                ret = wc_InitRsaKeyPKCS11((RsaKey*)ssl->sigKey,
+                                                          ssl->heap,
+                                                          ssl->p11SessionId);
+                            else
+#endif
+                                ret = wc_InitRsaKey((RsaKey*)ssl->sigKey,
+                                                    ssl->heap);
                             if (ret != 0) {
                                 goto exit_sske;
                             }
@@ -16520,9 +16582,18 @@ int DoSessionTicket(WOLFSSL* ssl,
                             if (!ssl->buffers.key->buffer) {
                                 ERROR_OUT(NO_PRIVATE_KEY, exit_sske);
                             }
-
-                            ret = wc_RsaPrivateKeyDecode(ssl->buffers.key->buffer, &i,
-                                                         (RsaKey*)ssl->sigKey, ssl->buffers.key->length);
+#ifdef HAVE_PKCS11
+                            if (((RsaKey*)ssl->sigKey)->hsm)
+                                ret = wc_RsaPrivateKeyDecodePKCS11(
+                                                    ssl->buffers.key->buffer,
+                                                    ssl->buffers.key->length,
+                                                    (RsaKey*)ssl->sigKey);
+                            else
+#endif
+                                ret = wc_RsaPrivateKeyDecode(
+                                                    ssl->buffers.key->buffer, &i,
+                                                    (RsaKey*)ssl->sigKey,
+                                                    ssl->buffers.key->length);
                             if (ret != 0) {
                                 goto exit_sske;
                             }
@@ -18347,14 +18418,30 @@ int DoSessionTicket(WOLFSSL* ssl,
                             ERROR_OUT(MEMORY_E, exit_dcke);
                         }
                         ssl->sigType = DYNAMIC_TYPE_RSA;
-
-                        ret = wc_InitRsaKey((RsaKey*)ssl->sigKey, ssl->heap);
+#ifdef HAVE_PKCS11
+                        if (ssl->buffers.key->type == RSA_HSM_TYPE)
+                            ret = wc_InitRsaKeyPKCS11((RsaKey*)ssl->sigKey,
+                                                      ssl->heap,
+                                                      ssl->p11SessionId);
+                        else
+#endif
+                            ret = wc_InitRsaKey((RsaKey*)ssl->sigKey, ssl->heap);
                         if (ret != 0) {
                             goto exit_dcke;
                         }
 
-                        ret = wc_RsaPrivateKeyDecode(ssl->buffers.key->buffer, &i,
-                                (RsaKey*)ssl->sigKey, ssl->buffers.key->length);
+#ifdef HAVE_PKCS11
+                        if (((RsaKey*)ssl->sigKey)->hsm)
+                            ret = wc_RsaPrivateKeyDecodePKCS11(
+                                                    ssl->buffers.key->buffer,
+                                                    ssl->buffers.key->length,
+                                                    (RsaKey*)ssl->sigKey);
+                        else
+#endif
+                            ret = wc_RsaPrivateKeyDecode(
+                                                    ssl->buffers.key->buffer, &i,
+                                                    (RsaKey*)ssl->sigKey,
+                                                    ssl->buffers.key->length);
                         if (ret != 0) {
                             goto exit_dcke;
                         }
