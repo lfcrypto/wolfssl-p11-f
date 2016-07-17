@@ -173,8 +173,8 @@ enum {
 
     WC_KEY_SIZE_E       = -234,  /* Key size error, either too small or large */
     ASN_COUNTRY_SIZE_E  = -235,  /* ASN Cert Gen, invalid country code size */
+    MISSING_RNG_E       = -236,  /* RNG required but not provided */
 
-    PKCS11_GET_VALUE_E    = -236, /* PKCS11 get value failed */
     PKCS11_FIND_KEY_E     = -237, /* PKCS11 find key failed */
     PKCS11_KEYTYPE_E      = -238, /* PKCS11 unknown key type */
     PKCS11_GENKEY_E       = -239, /* PKCS11 generate key failed */
@@ -198,6 +198,7 @@ enum {
     PKCS11_FINDOBJFINAL_E = -257, /* PKCS11 find object final failed */
     PKCS11_FINDOBJ_NONE   = -258, /* PKCS11 object not found */
     PKCS11_DELETEOBJ_E    = -259, /* PKCS11 delete object failed */
+    PKCS11_GET_VALUE_E    = -260, /* PKCS11 get value failed */
 
     MIN_CODE_E          = -300   /* errors -101 - -299 */
 
